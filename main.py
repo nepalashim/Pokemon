@@ -2,12 +2,13 @@ from fastapi import FastAPI, Query
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
-from sqlalchemy import create_engine, Column, Integer, String, MetaData
-from sqlalchemy.ext.declarative import declarative_base
-from sqlalchemy.orm import sessionmaker
 import asyncio
 from typing import List
 
+from database import Pokemon, SessionLocal
+
+# Importing the Pydantic model
+from pydantic import BaseModel
 
 #setting up fastapi app
 
@@ -29,22 +30,23 @@ app.add_middleware(
 #fetching and storing pokemon data with an async function
 
 async def fetch_and_store_pokemons():
-    # Use httpx to fetch data from PokeAPI
     async with httpx.AsyncClient() as client:
         response = await client.get("https://pokeapi.co/api/v2/pokemon?limit=100")
+        data = response.json()
 
-    # Extraction of relevant data from the response
-    pokemons = [
-        {
-            "name": pokemon["name"],
-            "image": f"https://pokeapi.co/media/sprites/pokemon/{pokemon['url'].split('/')[-2]}.png",
-            "type": next(iter(pokemon["types"]))["type"]["name"],
-        }
-        for pokemon in response.json()["results"]
-    ]
+        pokemons = []
+        for pokemon in data["results"]:
+            response = await client.get(pokemon["url"])
+            pokemon_data = response.json()
 
-    # Storation of data in the database
-    async with SessionLocal() as db:
+            pokemons.append({
+                "id": pokemon_data["id"],
+                "name": pokemon["name"],
+                "image": f"https://pokeapi.co/media/sprites/pokemon/{pokemon_data['id']}.png",
+                "type": next(iter(pokemon_data["types"]))["type"]["name"],
+            })
+
+    with SessionLocal() as db:
         for pokemon in pokemons:
             db_pokemon = Pokemon(**pokemon)
             db.add(db_pokemon)
@@ -56,19 +58,27 @@ asyncio.run(fetch_and_store_pokemons())
 
 #defining API endpoints
 
-@app.get("/api/v1/pokemons", response_model=List[Pokemon])
+class PokemonSchema(BaseModel):
+    id: int
+    name: str
+    image: str
+    type: str
+
+    class Config:
+        from_attributes = True
+
+@app.get("/api/v1/pokemons", response_model=List[PokemonSchema])
 async def get_pokemons(
     type: str = Query(None, title="Filter by Pokemon type"),
     name: str = Query(None, title="Filter by Pokemon name"),
 ):
-    # Query the database based on provided filters
     filters = []
     if type:
         filters.append(Pokemon.type == type)
     if name:
         filters.append(Pokemon.name.ilike(f"%{name}%"))
 
-    async with SessionLocal() as db:
+    with SessionLocal() as db:
         if filters:
             pokemons = db.query(Pokemon).filter(*filters).all()
         else:
